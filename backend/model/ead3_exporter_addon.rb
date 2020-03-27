@@ -69,6 +69,30 @@ class EAD3Serializer < EADSerializer
 
   end
 
+  # keep AS IS during upgrade.  discuss upgrade ot core, since why not include these access restrict values in the EAD???
+  def serialize_note_content(note, xml, fragments)
+    return if note["publish"] === false && !@include_unpublished
+    audatt = note["publish"] === false ? {:audience => 'internal'} : {}
+    content = note["content"]
+
+    atts = {:id => prefix_id(note['persistent_id']) }.reject{|k,v| v.nil? || v.empty? || v == "null" }.merge(audatt)
+
+    if note["type"] == 'accessrestrict' && !note["rights_restriction"]["local_access_restriction_type"].empty?
+      accessatt = {:localtype => note["rights_restriction"]["local_access_restriction_type"].join(' ')}
+      atts = atts.merge(accessatt)
+    end
+
+    head_text = note['label'] ? note['label'] : I18n.t("enumerations._note_types.#{note['type']}", :default => note['type'])
+    content, head_text = extract_head_text(content, head_text)
+    xml.send(note['type'], atts) {
+      xml.head { sanitize_mixed_content(head_text, xml, fragments) } unless ASpaceExport::Utils.headless_note?(note['type'], content )
+      sanitize_mixed_content(content, xml, fragments, ASpaceExport::Utils.include_p?(note['type']) ) if content
+      if note['subnotes']
+        serialize_subnotes(note['subnotes'], xml, fragments, ASpaceExport::Utils.include_p?(note['type']))
+      end
+    }
+  end
+
   # use new def from EAD2002 once we upgrade, but add back in the URIs.
   def serialize_child(data, xml, fragments, c_depth = 1)
     begin
