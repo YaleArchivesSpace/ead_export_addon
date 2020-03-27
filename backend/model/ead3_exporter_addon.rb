@@ -18,7 +18,8 @@ class EAD3Serializer < EADSerializer
         certainty: date['certainty'] ? date['certainty'] : nil,
         era: date['era'] ? date['era'] : nil,
         calendar: date['calendar'] ? date['calendar'] : nil,
-        audience: date['publish'] === false ? 'internal' : nil
+        audience: date['publish'] === false ? 'internal' : nil,
+        label: date['label'] ? date['label'] : nil,
       }
 
       unless date['date_type'].nil?
@@ -56,6 +57,7 @@ class EAD3Serializer < EADSerializer
           #no need to have two sibling dates for the same ASpace date, so i'm moving this element up.
           #now we'll know, unambiguously, when two dates are actually one in the same (since they'll be bundled together)...
           #and we will post-process this unitdatestructured/unitdate invalidity (rather than have to try to compare siblings that may or may not have originated from the same ASpace date subrecord.)
+          #i think we can "fix" this in the core, by just adding 'expression' to altrender when it's present on a structured date.
           if date['expression']
             add_unitdate.call(date['expression'], xml, fragments, date_atts)
           end
@@ -69,7 +71,7 @@ class EAD3Serializer < EADSerializer
 
   end
 
-  # keep AS IS during upgrade.  discuss upgrade ot core, since why not include these access restrict values in the EAD???
+  # keep AS IS during upgrade.  discuss upgrade to core, since why not include these access restrict values in the EAD???
   def serialize_note_content(note, xml, fragments)
     return if note["publish"] === false && !@include_unpublished
     audatt = note["publish"] === false ? {:audience => 'internal'} : {}
