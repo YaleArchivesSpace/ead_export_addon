@@ -3,6 +3,7 @@
 class EAD3Serializer < EADSerializer
   serializer_for :ead3
 
+  # keep AS IS during upgrade.  discuss upgrade to core that would put the date expression for "structured" dates in altrender, not in a sibling date record that is unlinked.
   def serialize_dates(obj, xml, fragments)
     add_unitdate = Proc.new do |value, context, fragments, atts={}|
       context.unitdate(atts) {
@@ -17,7 +18,8 @@ class EAD3Serializer < EADSerializer
         certainty: date['certainty'] ? date['certainty'] : nil,
         era: date['era'] ? date['era'] : nil,
         calendar: date['calendar'] ? date['calendar'] : nil,
-        audience: date['publish'] === false ? 'internal' : nil
+        audience: date['publish'] === false ? 'internal' : nil,
+        label: date['label'] ? date['label'] : nil,
       }
 
       unless date['date_type'].nil?
@@ -55,6 +57,7 @@ class EAD3Serializer < EADSerializer
           #no need to have two sibling dates for the same ASpace date, so i'm moving this element up.
           #now we'll know, unambiguously, when two dates are actually one in the same (since they'll be bundled together)...
           #and we will post-process this unitdatestructured/unitdate invalidity (rather than have to try to compare siblings that may or may not have originated from the same ASpace date subrecord.)
+          #i think we can "fix" this in the core, by just adding 'expression' to altrender when it's present on a structured date.
           if date['expression']
             add_unitdate.call(date['expression'], xml, fragments, date_atts)
           end
@@ -68,8 +71,481 @@ class EAD3Serializer < EADSerializer
 
   end
 
+  # keep AS IS during upgrade.  discuss upgrade to core, since why not include these access restrict values in the EAD???
+  def serialize_note_content(note, xml, fragments)
+    return if note["publish"] === false && !@include_unpublished
+    audatt = note["publish"] === false ? {:audience => 'internal'} : {}
+    content = note["content"]
+
+    atts = {:id => prefix_id(note['persistent_id']) }.reject{|k,v| v.nil? || v.empty? || v == "null" }.merge(audatt)
+
+    if note["type"] == 'accessrestrict' && !note["rights_restriction"]["local_access_restriction_type"].empty?
+      accessatt = {:localtype => note["rights_restriction"]["local_access_restriction_type"].join(' ')}
+      atts = atts.merge(accessatt)
+    end
+
+    head_text = note['label'] ? note['label'] : I18n.t("enumerations._note_types.#{note['type']}", :default => note['type'])
+    content, head_text = extract_head_text(content, head_text)
+    xml.send(note['type'], atts) {
+      xml.head { sanitize_mixed_content(head_text, xml, fragments) } unless ASpaceExport::Utils.headless_note?(note['type'], content )
+      sanitize_mixed_content(content, xml, fragments, ASpaceExport::Utils.include_p?(note['type']) ) if content
+      if note['subnotes']
+        serialize_subnotes(note['subnotes'], xml, fragments, ASpaceExport::Utils.include_p?(note['type']))
+      end
+    }
+  end
+
+  # use new def from EAD2002 once we upgrade, but add back in the URIs.
+  def serialize_child(data, xml, fragments, c_depth = 1)
+    begin
+    return if data["publish"] === false && !@include_unpublished
+    return if data["suppressed"] === true
+
+    tag_name = @use_numbered_c_tags ? :"c#{c_depth.to_s.rjust(2, '0')}" : :c
+
+    atts = {:level => data.level, :otherlevel => data.other_level, :id => prefix_id(data.ref_id), :altrender => data.uri}
+
+    if data.publish === false
+      atts[:audience] = 'internal'
+    end
+
+    atts.reject! {|k, v| v.nil?}
+    xml.send(tag_name, atts) {
+
+      xml.did {
+        if (val = data.title)
+          xml.unittitle {  sanitize_mixed_content( val,xml, fragments) }
+        end
+
+        if !data.component_id.nil? && !data.component_id.empty?
+          xml.unitid data.component_id
+        end
+
+        if @include_unpublished
+          data.external_ids.each do |exid|
+            xml.unitid  ({ "audience" => "internal",  "type" => exid['source'], "identifier" => exid['external_id']}) { xml.text exid['external_id']}
+          end
+        end
+
+        serialize_origination(data, xml, fragments)
+        serialize_extents(data, xml, fragments)
+        serialize_dates(data, xml, fragments)
+        serialize_did_notes(data, xml, fragments)
+
+        EADSerializer.run_serialize_step(data, xml, fragments, :did)
+
+        data.instances_with_sub_containers.each do |instance|
+          serialize_container(instance, xml, @fragments)
+        end
+
+        if @include_daos
+          data.instances_with_digital_objects.each do |instance|
+            serialize_digital_object(instance['digital_object']['_resolved'], xml, fragments)
+          end
+        end
+      }
+
+      serialize_nondid_notes(data, xml, fragments)
+
+      serialize_bibliographies(data, xml, fragments)
+
+      serialize_indexes(data, xml, fragments)
+
+      serialize_controlaccess(data, xml, fragments)
+
+      EADSerializer.run_serialize_step(data, xml, fragments, :archdesc)
+
+      data.children_indexes.each do |i|
+        xml.text(
+                 @stream_handler.buffer {|xml, new_fragments|
+                   serialize_child(data.get_child(i), xml, new_fragments, c_depth + 1)
+                 }
+                 )
+      end
+    }
+    rescue => e
+      xml.text "ASPACE EXPORT ERROR : YOU HAVE A PROBLEM WITH YOUR EXPORT OF ARCHIVAL OBJECTS. THE FOLLOWING INFORMATION MAY HELP:\n
+                MESSAGE: #{e.message.inspect}  \n
+                TRACE: #{e.backtrace.inspect} \n "
+    end
+  end
+
+  # use new def, but keep the URI on archdesc altrender after the upgrade
+  def stream(data)
+  @stream_handler = ASpaceExport::StreamHandler.new
+  @fragments = ASpaceExport::RawXMLHandler.new
+  @include_unpublished = data.include_unpublished?
+  @include_daos = data.include_daos?
+  @use_numbered_c_tags = data.use_numbered_c_tags?
+  @id_prefix = I18n.t('archival_object.ref_id_export_prefix', :default => 'aspace_')
+
+  builder = Nokogiri::XML::Builder.new(:encoding => "UTF-8") do |xml|
+    begin
+
+    ead_attributes = {}
+
+    if data.publish === false
+      ead_attributes['audience'] = 'internal'
+    end
+
+    xml.ead( ead_attributes ) {
+
+      xml.text (
+        @stream_handler.buffer { |xml, new_fragments|
+          serialize_control(data, xml, new_fragments)
+        }
+      )
+
+      atts = {:level => data.level, :otherlevel => data.other_level, :altrender => data.uri}
+      atts.reject! {|k, v| v.nil?}
+
+      xml.archdesc(atts) {
+
+        xml.did {
+
+          unless data.title.nil?
+            xml.unittitle { sanitize_mixed_content(data.title, xml, @fragments) }
+          end
+
+          xml.unitid (0..3).map{ |i| data.send("id_#{i}") }.compact.join('.')
+
+          unless data.repo.nil? || data.repo.name.nil?
+            xml.repository {
+              xml.corpname {
+                xml.part {
+                  sanitize_mixed_content(data.repo.name, xml, @fragments)
+                }
+              }
+            }
+          end
+
+          unless data.language.nil?
+            xml.langmaterial {
+              xml.language(:langcode => data.language) {
+                xml.text I18n.t("enumerations.language_iso639_2.#{ data.language }", :default => data.language)
+              }
+            }
+          end
+
+          data.instances_with_sub_containers.each do |instance|
+            serialize_container(instance, xml, @fragments)
+          end
+
+          serialize_extents(data, xml, @fragments)
+
+          serialize_dates(data, xml, @fragments)
+
+          serialize_did_notes(data, xml, @fragments)
+
+          serialize_origination(data, xml, @fragments)
+
+          if @include_unpublished
+            data.external_ids.each do |exid|
+              xml.unitid  ({ "audience" => "internal", "type" => exid['source'], "identifier" => exid['external_id']}) { xml.text exid['external_id']}
+            end
+          end
 
 
+          EADSerializer.run_serialize_step(data, xml, @fragments, :did)
+
+        }# </did>
+
+        serialize_nondid_notes(data, xml, @fragments)
+
+        data.digital_objects.each do |dob|
+              serialize_digital_object(dob, xml, @fragments)
+        end
+
+        serialize_bibliographies(data, xml, @fragments)
+
+        serialize_indexes(data, xml, @fragments)
+
+        serialize_controlaccess(data, xml, @fragments)
+
+        EADSerializer.run_serialize_step(data, xml, @fragments, :archdesc)
+
+        xml.dsc {
+
+          data.children_indexes.each do |i|
+            xml.text( @stream_handler.buffer {
+              |xml, new_fragments| serialize_child(data.get_child(i), xml, new_fragments)
+              }
+            )
+          end
+        }
+      }
+    }
+
+    rescue => e
+      xml.text  "ASPACE EXPORT ERROR : YOU HAVE A PROBLEM WITH YOUR EXPORT OF YOUR RESOURCE. THE FOLLOWING INFORMATION MAY HELP:\n
+                MESSAGE: #{e.message.inspect}  \n
+                TRACE: #{e.backtrace.inspect} \n "
+    end
+
+  end
+
+
+  # Add xml-model for rng
+  # Make this conditional if XSD or DTD are requested
+  xmlmodel_content = 'href="https://raw.githubusercontent.com/SAA-SDT/EAD3/master/ead3.rng"
+    type="application/xml" schematypens="http://relaxng.org/ns/structure/1.0"'
+
+  xmlmodel = Nokogiri::XML::ProcessingInstruction.new(builder.doc, "xml-model", xmlmodel_content)
+
+  builder.doc.root.add_previous_sibling(xmlmodel)
+
+  builder.doc.root.add_namespace nil, 'http://ead3.archivists.org/schema/'
+
+  Enumerator.new do |y|
+    @stream_handler.stream_out(builder, @fragments, y)
+  end
+
+end # END stream
+
+
+  # use new def once we upgrade, but add back user_defined.string_2
+  def serialize_control(data, xml, fragments)
+    control_atts = {
+      repositoryencoding: "iso15511",
+      countryencoding: "iso3166-1",
+      dateencoding: "iso8601",
+      relatedencoding: "marc",
+      langencoding: "iso639-2b",
+      scriptencoding: "iso15924"
+    }.reject{|k,v| v.nil? || v.empty? || v == "null"}
+
+    xml.control(control_atts) {
+
+      recordid_atts = {
+        instanceurl: data.ead_location
+      }
+
+      otherrecordid_atts = {
+        localtype: "BIB"
+      }
+
+      xml.recordid(recordid_atts) {
+        xml.text(data.ead_id)
+      }
+
+      if data.user_defined['string_2']
+        xml.otherrecordid(otherrecordid_atts) {
+          xml.text(data.user_defined['string_2'])
+        }
+      end
+
+      xml.filedesc {
+
+        xml.titlestmt {
+          # titleproper
+          titleproper = ""
+          titleproper += "#{data.finding_aid_title} " if data.finding_aid_title
+          titleproper += "#{data.title}" if ( data.title && titleproper.empty? )
+          xml.titleproper {  strip_tags_and_sanitize(titleproper, xml, fragments) }
+
+          # titleproper (filing)
+          unless data.finding_aid_filing_title.nil?
+            xml.titleproper("localtype" => "filing") {
+              sanitize_mixed_content(data.finding_aid_filing_title, xml, fragments)
+            }
+          end
+
+          # subtitle
+          unless data.finding_aid_subtitle.nil?
+            xml.subtitle {
+              sanitize_mixed_content(data.finding_aid_subtitle, xml, fragments)
+            }
+          end
+
+          # author
+          unless data.finding_aid_author.nil?
+            xml.author {
+              sanitize_mixed_content(data.finding_aid_author, xml, fragments)
+            }
+          end
+
+          # sponsor
+          unless data.finding_aid_sponsor.nil?
+            xml.sponsor {
+              sanitize_mixed_content( data.finding_aid_sponsor, xml, fragments)
+            }
+          end
+        }
+
+        unless data.finding_aid_edition_statement.nil?
+          xml.editionstmt {
+            sanitize_mixed_content(data.finding_aid_edition_statement, xml, fragments, true )
+          }
+        end
+
+        xml.publicationstmt {
+
+          xml.publisher { sanitize_mixed_content(data.repo.name, xml, fragments) }
+
+          repo_addresslines = data.addresslines_keyed
+
+          unless repo_addresslines.empty?
+            xml.address {
+
+              repo_addresslines.each do |key, line|
+                if ['telephone', 'email'].include?(key)
+                  addressline_atts = { localtype: key }
+                  xml.addressline(addressline_atts) {
+                    sanitize_mixed_content(line, xml, fragments)
+                  }
+                else
+                  xml.addressline { sanitize_mixed_content( line, xml, fragments) }
+                end
+              end
+
+              if data.repo.url
+                xml.addressline {
+                  xml.ref ({ href: data.repo.url, linktitle: data.repo.url, show: "new" }) {
+                    xml.text(data.repo.url)
+                  }
+                }
+              end
+            }
+          end
+
+          if (data.finding_aid_date)
+            xml.date { sanitize_mixed_content( data.finding_aid_date, xml, fragments) }
+          end
+
+          num = (0..3).map { |i| data.send("id_#{i}") }.compact.join('.')
+          unless num.empty?
+            xml.num() {
+              xml.text(num)
+            }
+          end
+
+          if data.repo.image_url
+            xml.p {
+              xml.ptr ({
+                href: data.repo.image_url,
+                actuate: "onload",
+                show: "embed"
+              })
+            }
+          end
+        }
+
+        if (data.finding_aid_series_statement)
+          xml.seriesstmt {
+            sanitize_mixed_content( data.finding_aid_series_statement, xml, fragments, true )
+          }
+        end
+
+        if ( data.finding_aid_note )
+          xml.notestmt {
+            xml.controlnote {
+              sanitize_mixed_content( data.finding_aid_note, xml, fragments, true )
+            }
+          }
+        end
+
+      } # END filedesc
+
+
+      xml.maintenancestatus( { value: 'derived' } )
+
+
+      maintenanceagency_atts = {
+        countrycode: data.repo.country
+      }.delete_if { |k,v| v.nil? || v.empty? }
+
+      xml.maintenanceagency(maintenanceagency_atts) {
+
+        unless data.repo.org_code.nil?
+          agencycode = data.repo.country ? "#{data.repo.country}-" : ''
+          agencycode += data.repo.org_code
+          xml.agencycode() {
+            xml.text(agencycode)
+          }
+        end
+
+        xml.agencyname() {
+          xml.text(data.repo.name)
+        }
+      }
+
+
+      unless data.finding_aid_language.nil?
+        xml.languagedeclaration() {
+
+          xml.language() {
+            strip_tags_and_sanitize( data.finding_aid_language, xml, fragments )
+          }
+
+          xml.script({ scriptcode: "Latn" }) {
+            xml.text('Latin')
+          }
+
+        }
+      end
+
+
+      unless data.finding_aid_description_rules.nil?
+        xml.conventiondeclaration {
+          xml.abbr {
+            xml.text(data.finding_aid_description_rules)
+          }
+          xml.citation {
+            xml.text(I18n.t("enumerations.resource_finding_aid_description_rules.#{ data.finding_aid_description_rules}"))
+          }
+        }
+      end
+
+
+      unless data.finding_aid_status.nil?
+        xml.localcontrol( { localtype: 'findaidstatus'} ) {
+          xml.term() {
+            xml.text(data.finding_aid_status)
+          }
+        }
+      end
+
+
+
+      xml.maintenancehistory() {
+
+        xml.maintenanceevent() {
+
+          xml.eventtype( { value: 'derived' } ) {}
+          xml.eventdatetime() {
+            xml.text(DateTime.now.to_s)
+          }
+          xml.agenttype( { value: 'machine' } ) {}
+          xml.agent() {
+            xml.text("ArchivesSpace #{ ASConstants.VERSION }")
+          }
+          xml.eventdescription {
+            xml.text("This finding aid was produced using ArchivesSpace on #{ DateTime.now.strftime('%A %B %e, %Y at %H:%M') }")
+          }
+        }
+
+
+        if data.revision_statements.length > 0
+          data.revision_statements.each do |rs|
+            xml.maintenanceevent() {
+              xml.eventtype( { value: 'revised' } ) {}
+              xml.eventdatetime() {
+                xml.text(rs['date'].to_s)
+              }
+              xml.agenttype( { value: 'unknown' } ) {}
+              xml.agent() {}
+              xml.eventdescription() {
+                sanitize_mixed_content( rs['description'], xml, fragments)
+              }
+            }
+          end
+        end
+      }
+
+    }
+  end # END serialize_control
+
+  #in core now.  can remove once we upgrade in 2020.
   def escape_ampersands(content)
     # first, find any pre-escaped entities and "mark" them by replacing & with @@
     # so something like &lt; becomes @@lt;
@@ -94,7 +570,7 @@ class EAD3Serializer < EADSerializer
     return content
   end
 
-
+#in core now.  can remove once we upgrade in 2020.
   def structure_children(content, parent_name = nil)
 
     # 4archon...
@@ -171,12 +647,13 @@ class EAD3Serializer < EADSerializer
     xml_errors(content).any? ? original_content : content
   end
 
-
+#in core now.  can remove once we upgrade in 2020.
   def strip_p(content)
     content = escape_ampersands(content)
     content.gsub("<p>", "").gsub("</p>", "").gsub("<p/>", '')
   end
 
+#in core now.  can remove once we upgrade in 2020.
   def sanitize_mixed_content(content, context, fragments, allow_p = false  )
     # remove smart quotes from text
     content = remove_smart_quotes(content)
@@ -213,7 +690,7 @@ class EAD3Serializer < EADSerializer
     end
   end
 
-
+#in core now.  can remove once we upgrade in 2020.
   def strip_invalid_children_from_note_content(content, parent_element_name)
     # convert & to @@ before generating XML fragment for processing
     content.gsub!(/&/,'@@')
