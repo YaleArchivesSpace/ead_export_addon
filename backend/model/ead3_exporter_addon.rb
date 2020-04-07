@@ -3,6 +3,47 @@
 class EAD3Serializer < EADSerializer
   serializer_for :ead3
 
+  # keep AS IS during upgrade.  discuss adding to core.
+  def serialize_origination(data, xml, fragments)
+    unless data.creators_and_sources.nil?
+      data.creators_and_sources.each do |link|
+        agent = link['_resolved']
+        link['role'] == 'creator' ? role = link['role'].capitalize : role = link['role']
+        relator = link['relator']
+        sort_name = agent['display_name']['sort_name']
+        rules = agent['display_name']['rules']
+        source = agent['display_name']['source']
+        authfilenumber = agent['display_name']['authority_id']
+        # new part, should be in core. ALSO needs to be added to MARCXML exports (even more importantly)
+        title = link['title']
+        node_name = case agent['agent_type']
+                    when 'agent_person'; 'persname'
+                    when 'agent_family'; 'famname'
+                    when 'agent_corporate_entity'; 'corpname'
+                    when 'agent_software'; 'name'
+                    end
+        xml.origination(:label => role) {
+
+          atts = {:relator => relator, :source => source, :rules => rules, :identifier => authfilenumber}
+
+          atts.reject! {|k, v| v.nil?}
+
+          xml.send(node_name, atts) {
+            xml.part() {
+              sanitize_mixed_content(sort_name, xml, fragments )
+            }
+            #new part...  probably a better way to do this, but it works.
+            if title
+              xml.part(:localtype => 'title') {
+                sanitize_mixed_content(title, xml, fragments )
+              }
+            end
+          }
+        }
+      end
+    end
+  end
+
   # keep AS IS during upgrade.  discuss upgrade to core that would put the date expression for "structured" dates in altrender, not in a sibling date record that is unlinked.
   def serialize_dates(obj, xml, fragments)
     add_unitdate = Proc.new do |value, context, fragments, atts={}|
@@ -172,135 +213,135 @@ class EAD3Serializer < EADSerializer
 
   # use new def, but keep the URI on archdesc altrender after the upgrade
   def stream(data)
-  @stream_handler = ASpaceExport::StreamHandler.new
-  @fragments = ASpaceExport::RawXMLHandler.new
-  @include_unpublished = data.include_unpublished?
-  @include_daos = data.include_daos?
-  @use_numbered_c_tags = data.use_numbered_c_tags?
-  @id_prefix = I18n.t('archival_object.ref_id_export_prefix', :default => 'aspace_')
+    @stream_handler = ASpaceExport::StreamHandler.new
+    @fragments = ASpaceExport::RawXMLHandler.new
+    @include_unpublished = data.include_unpublished?
+    @include_daos = data.include_daos?
+    @use_numbered_c_tags = data.use_numbered_c_tags?
+    @id_prefix = I18n.t('archival_object.ref_id_export_prefix', :default => 'aspace_')
 
-  builder = Nokogiri::XML::Builder.new(:encoding => "UTF-8") do |xml|
-    begin
+    builder = Nokogiri::XML::Builder.new(:encoding => "UTF-8") do |xml|
+      begin
 
-    ead_attributes = {}
+      ead_attributes = {}
 
-    if data.publish === false
-      ead_attributes['audience'] = 'internal'
-    end
+      if data.publish === false
+        ead_attributes['audience'] = 'internal'
+      end
 
-    xml.ead( ead_attributes ) {
+      xml.ead( ead_attributes ) {
 
-      xml.text (
-        @stream_handler.buffer { |xml, new_fragments|
-          serialize_control(data, xml, new_fragments)
-        }
-      )
+        xml.text (
+          @stream_handler.buffer { |xml, new_fragments|
+            serialize_control(data, xml, new_fragments)
+          }
+        )
 
-      atts = {:level => data.level, :otherlevel => data.other_level, :altrender => data.uri}
-      atts.reject! {|k, v| v.nil?}
+        atts = {:level => data.level, :otherlevel => data.other_level, :altrender => data.uri}
+        atts.reject! {|k, v| v.nil?}
 
-      xml.archdesc(atts) {
+        xml.archdesc(atts) {
 
-        xml.did {
+          xml.did {
 
-          unless data.title.nil?
-            xml.unittitle { sanitize_mixed_content(data.title, xml, @fragments) }
-          end
+            unless data.title.nil?
+              xml.unittitle { sanitize_mixed_content(data.title, xml, @fragments) }
+            end
 
-          xml.unitid (0..3).map{ |i| data.send("id_#{i}") }.compact.join('.')
+            xml.unitid (0..3).map{ |i| data.send("id_#{i}") }.compact.join('.')
 
-          unless data.repo.nil? || data.repo.name.nil?
-            xml.repository {
-              xml.corpname {
-                xml.part {
-                  sanitize_mixed_content(data.repo.name, xml, @fragments)
+            unless data.repo.nil? || data.repo.name.nil?
+              xml.repository {
+                xml.corpname {
+                  xml.part {
+                    sanitize_mixed_content(data.repo.name, xml, @fragments)
+                  }
                 }
               }
-            }
-          end
-
-          unless data.language.nil?
-            xml.langmaterial {
-              xml.language(:langcode => data.language) {
-                xml.text I18n.t("enumerations.language_iso639_2.#{ data.language }", :default => data.language)
-              }
-            }
-          end
-
-          data.instances_with_sub_containers.each do |instance|
-            serialize_container(instance, xml, @fragments)
-          end
-
-          serialize_extents(data, xml, @fragments)
-
-          serialize_dates(data, xml, @fragments)
-
-          serialize_did_notes(data, xml, @fragments)
-
-          serialize_origination(data, xml, @fragments)
-
-          if @include_unpublished
-            data.external_ids.each do |exid|
-              xml.unitid  ({ "audience" => "internal", "type" => exid['source'], "identifier" => exid['external_id']}) { xml.text exid['external_id']}
             end
-          end
 
-
-          EADSerializer.run_serialize_step(data, xml, @fragments, :did)
-
-        }# </did>
-
-        serialize_nondid_notes(data, xml, @fragments)
-
-        data.digital_objects.each do |dob|
-              serialize_digital_object(dob, xml, @fragments)
-        end
-
-        serialize_bibliographies(data, xml, @fragments)
-
-        serialize_indexes(data, xml, @fragments)
-
-        serialize_controlaccess(data, xml, @fragments)
-
-        EADSerializer.run_serialize_step(data, xml, @fragments, :archdesc)
-
-        xml.dsc {
-
-          data.children_indexes.each do |i|
-            xml.text( @stream_handler.buffer {
-              |xml, new_fragments| serialize_child(data.get_child(i), xml, new_fragments)
+            unless data.language.nil?
+              xml.langmaterial {
+                xml.language(:langcode => data.language) {
+                  xml.text I18n.t("enumerations.language_iso639_2.#{ data.language }", :default => data.language)
+                }
               }
-            )
+            end
+
+            data.instances_with_sub_containers.each do |instance|
+              serialize_container(instance, xml, @fragments)
+            end
+
+            serialize_extents(data, xml, @fragments)
+
+            serialize_dates(data, xml, @fragments)
+
+            serialize_did_notes(data, xml, @fragments)
+
+            serialize_origination(data, xml, @fragments)
+
+            if @include_unpublished
+              data.external_ids.each do |exid|
+                xml.unitid  ({ "audience" => "internal", "type" => exid['source'], "identifier" => exid['external_id']}) { xml.text exid['external_id']}
+              end
+            end
+
+
+            EADSerializer.run_serialize_step(data, xml, @fragments, :did)
+
+          }# </did>
+
+          serialize_nondid_notes(data, xml, @fragments)
+
+          data.digital_objects.each do |dob|
+                serialize_digital_object(dob, xml, @fragments)
           end
+
+          serialize_bibliographies(data, xml, @fragments)
+
+          serialize_indexes(data, xml, @fragments)
+
+          serialize_controlaccess(data, xml, @fragments)
+
+          EADSerializer.run_serialize_step(data, xml, @fragments, :archdesc)
+
+          xml.dsc {
+
+            data.children_indexes.each do |i|
+              xml.text( @stream_handler.buffer {
+                |xml, new_fragments| serialize_child(data.get_child(i), xml, new_fragments)
+                }
+              )
+            end
+          }
         }
       }
-    }
 
-    rescue => e
-      xml.text  "ASPACE EXPORT ERROR : YOU HAVE A PROBLEM WITH YOUR EXPORT OF YOUR RESOURCE. THE FOLLOWING INFORMATION MAY HELP:\n
-                MESSAGE: #{e.message.inspect}  \n
-                TRACE: #{e.backtrace.inspect} \n "
+      rescue => e
+        xml.text  "ASPACE EXPORT ERROR : YOU HAVE A PROBLEM WITH YOUR EXPORT OF YOUR RESOURCE. THE FOLLOWING INFORMATION MAY HELP:\n
+                  MESSAGE: #{e.message.inspect}  \n
+                  TRACE: #{e.backtrace.inspect} \n "
+      end
+
     end
 
-  end
 
+    # Add xml-model for rng
+    # Make this conditional if XSD or DTD are requested
+    xmlmodel_content = 'href="https://raw.githubusercontent.com/SAA-SDT/EAD3/master/ead3.rng"
+      type="application/xml" schematypens="http://relaxng.org/ns/structure/1.0"'
 
-  # Add xml-model for rng
-  # Make this conditional if XSD or DTD are requested
-  xmlmodel_content = 'href="https://raw.githubusercontent.com/SAA-SDT/EAD3/master/ead3.rng"
-    type="application/xml" schematypens="http://relaxng.org/ns/structure/1.0"'
+    xmlmodel = Nokogiri::XML::ProcessingInstruction.new(builder.doc, "xml-model", xmlmodel_content)
 
-  xmlmodel = Nokogiri::XML::ProcessingInstruction.new(builder.doc, "xml-model", xmlmodel_content)
+    builder.doc.root.add_previous_sibling(xmlmodel)
 
-  builder.doc.root.add_previous_sibling(xmlmodel)
+    builder.doc.root.add_namespace nil, 'http://ead3.archivists.org/schema/'
 
-  builder.doc.root.add_namespace nil, 'http://ead3.archivists.org/schema/'
+    Enumerator.new do |y|
+      @stream_handler.stream_out(builder, @fragments, y)
+    end
 
-  Enumerator.new do |y|
-    @stream_handler.stream_out(builder, @fragments, y)
-  end
-
-end # END stream
+  end # END stream
 
 
   # use new def once we upgrade, but add back user_defined.string_2
