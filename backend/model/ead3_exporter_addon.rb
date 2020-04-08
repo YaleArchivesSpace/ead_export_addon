@@ -3,11 +3,133 @@
 class EAD3Serializer < EADSerializer
   serializer_for :ead3
 
+
+  # keep AS IS during upgrade.  discuss adding to core.  need those parts!
+  def serialize_controlaccess(data, xml, fragments)
+
+    if (data.controlaccess_subjects.length + data.controlaccess_linked_agents.length) > 0
+      xml.controlaccess {
+
+    ##### this uses data supplied by the helper.... but that smooshes everything into 'content'
+    ##### we want to handle each term, though.
+#        data.controlaccess_subjects.each do |node_data|
+#
+#          if node_data[:atts]['authfilenumber']
+#            node_data[:atts]['identifier'] = node_data[:atts]['authfilenumber'].clone
+#            node_data[:atts].delete('authfilenumber')
+#          end
+
+#          xml.send(node_data[:node_name], node_data[:atts]) {
+#            xml.part() {
+#              sanitize_mixed_content( node_data[:content], xml, fragments, ASpaceExport::Utils.include_p?(node_data[:node_name]) )
+#          }
+#      end
+        data.subjects.each do |link|
+          subject = link['_resolved']
+          node_name = case subject['terms'][0]['term_type']
+                when 'function'; 'function'
+                when 'genre_form', 'style_period';  'genreform'
+                when 'geographic'; 'geogname'
+                when 'occupation';  'occupation'
+                when 'topical', 'cultural_context'; 'subject'
+                when 'uniform_title'; 'title'
+                else; nil
+              end
+          terms = subject['terms']
+
+          atts = {}
+          atts['source'] = subject['source'] if subject['source']
+          atts['identifier'] = subject['authority_id'] if subject['authority_id']
+
+          next unless node_name
+
+          xml.send(node_name, atts) {
+            terms.each do |t|
+              xml.part(:localtype => t['term_type']) {
+                sanitize_mixed_content(t['term'], xml, fragments )
+              }
+            end
+          }
+        end
+
+      ##### this is also bad, primarily because the helper file adds "fmo" to all agents linked as sources.
+      ##### so, we'll start from scratch for here and make sure not to supply data that isn't there.... and also we'll split out terms into separate part elements.
+      # data.controlaccess_linked_agents.each do |node_data|
+
+      #   if node_data[:atts][:role]
+      #    node_data[:atts][:relator] = node_data[:atts][:role]
+      #      node_data[:atts].delete(:role)
+      #    end
+
+      #    if node_data[:atts][:authfilenumber]
+      #      node_data[:atts][:identifier] = node_data[:atts][:authfilenumber].clone
+      #      node_data[:atts].delete(:authfilenumber)
+      #    end
+
+      #    xml.send(node_data[:node_name], node_data[:atts]) {
+      #      xml.part() {
+      #      }
+      #    }
+      #  end
+      data.linked_agents.each do |link|
+        next if ['creator', 'source'].include? link['role'] || (link['_resolved']['publish'] == false && !@include_unpublished)
+
+        terms = link['terms']
+
+        role = link['relator']
+
+        agent = link['_resolved'].dup
+        rules = agent['display_name']['rules']
+        source = agent['display_name']['source']
+        identifier = agent['display_name']['authority_id']
+
+        agent_node_name = case agent['agent_type']
+                    when 'agent_person'; 'persname'
+                    when 'agent_family'; 'famname'
+                    when 'agent_corporate_entity'; 'corpname'
+                    when 'agent_software'; 'name'
+                  end
+
+        atts = {}
+        atts[:role] = role if role
+        atts[:source] = source if source
+        atts[:rules] = rules if rules
+        atts[:identifier] = identifier if identifier
+        atts[:audience] = 'internal' if link['_resolved']['publish'] == false
+
+        primary_part_atts = {}
+        primary_part_atts[:localtype] = agent['agent_type'] if agent['agent_type']
+
+        next unless agent_node_name
+
+        if terms.length > 0
+          primary_part_atts[:identifier]  = atts[:identifier].clone
+          atts.delete(:identifier)
+        end
+
+        xml.send(agent_node_name, atts) {
+          xml.part(primary_part_atts) {
+            sanitize_mixed_content(agent['title'], xml, fragments)
+          }
+          terms.each do |t|
+            xml.part(:localtype => t['term_type']) {
+              sanitize_mixed_content(t['term'], xml, fragments )
+            }
+          end
+        }
+
+      end
+
+      } #</controlaccess>
+    end
+  end
+
   # keep AS IS during upgrade.  discuss adding to core.
   def serialize_origination(data, xml, fragments)
     unless data.creators_and_sources.nil?
       data.creators_and_sources.each do |link|
         agent = link['_resolved']
+        #not sure why this is needed? Creator vs. source???
         link['role'] == 'creator' ? role = link['role'].capitalize : role = link['role']
         relator = link['relator']
         sort_name = agent['display_name']['sort_name']
@@ -26,16 +148,24 @@ class EAD3Serializer < EADSerializer
 
           atts = {:relator => relator, :source => source, :rules => rules, :identifier => authfilenumber}
 
+          primary_part_atts = {}
+          primary_part_atts[:localtype] = agent['agent_type'] if agent['agent_type']
+
+          if title
+            primary_part_atts[:identifier]  = atts[:identifier].clone
+            atts.delete(:identifier)
+          end
+
           atts.reject! {|k, v| v.nil?}
 
           xml.send(node_name, atts) {
-            xml.part() {
-              sanitize_mixed_content(sort_name, xml, fragments )
+            xml.part(primary_part_atts) {
+              sanitize_mixed_content(sort_name, xml, fragments)
             }
             #new part...  probably a better way to do this, but it works.
             if title
               xml.part(:localtype => 'title') {
-                sanitize_mixed_content(title, xml, fragments )
+                sanitize_mixed_content(title, xml, fragments)
               }
             end
           }
@@ -60,7 +190,7 @@ class EAD3Serializer < EADSerializer
         era: date['era'] ? date['era'] : nil,
         calendar: date['calendar'] ? date['calendar'] : nil,
         audience: date['publish'] === false ? 'internal' : nil,
-        label: date['label'] ? date['label'] : nil,
+        label: date['label'] ? date['label'] : nil
       }
 
       unless date['date_type'].nil?
@@ -98,7 +228,6 @@ class EAD3Serializer < EADSerializer
           #no need to have two sibling dates for the same ASpace date, so i'm moving this element up.
           #now we'll know, unambiguously, when two dates are actually one in the same (since they'll be bundled together)...
           #and we will post-process this unitdatestructured/unitdate invalidity (rather than have to try to compare siblings that may or may not have originated from the same ASpace date subrecord.)
-          #i think we can "fix" this in the core, by just adding 'expression' to altrender when it's present on a structured date.
           if date['expression']
             add_unitdate.call(date['expression'], xml, fragments, date_atts)
           end
@@ -112,7 +241,7 @@ class EAD3Serializer < EADSerializer
 
   end
 
-  # keep AS IS during upgrade.  discuss upgrade to core, since why not include these access restrict values in the EAD???
+  # keep AS IS during upgrade.  discuss upgrade ot core, since why not include these access restrict values in the EAD???
   def serialize_note_content(note, xml, fragments)
     return if note["publish"] === false && !@include_unpublished
     audatt = note["publish"] === false ? {:audience => 'internal'} : {}
@@ -135,6 +264,7 @@ class EAD3Serializer < EADSerializer
       end
     }
   end
+
 
   # use new def from EAD2002 once we upgrade, but add back in the URIs.
   def serialize_child(data, xml, fragments, c_depth = 1)
@@ -322,7 +452,6 @@ class EAD3Serializer < EADSerializer
                   MESSAGE: #{e.message.inspect}  \n
                   TRACE: #{e.backtrace.inspect} \n "
       end
-
     end
 
 
