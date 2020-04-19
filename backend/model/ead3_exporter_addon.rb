@@ -102,7 +102,7 @@ class EAD3Serializer < EADSerializer
 
         next unless agent_node_name
 
-        if terms.length > 0
+        if identifier && (terms.length > 0)
           primary_part_atts[:identifier]  = atts[:identifier].clone
           atts.delete(:identifier)
         end
@@ -135,7 +135,7 @@ class EAD3Serializer < EADSerializer
         sort_name = agent['display_name']['sort_name']
         rules = agent['display_name']['rules']
         source = agent['display_name']['source']
-        authfilenumber = agent['display_name']['authority_id']
+        identifier = agent['display_name']['authority_id']
         # new part, should be in core. ALSO needs to be added to MARCXML exports (even more importantly)
         title = link['title']
         node_name = case agent['agent_type']
@@ -146,13 +146,13 @@ class EAD3Serializer < EADSerializer
                     end
         xml.origination(:label => role) {
 
-          atts = {:relator => relator, :source => source, :rules => rules, :identifier => authfilenumber}
+          atts = {:relator => relator, :source => source, :rules => rules, :identifier => identifier}
 
           primary_part_atts = {}
           primary_part_atts[:localtype] = agent['agent_type'] if agent['agent_type']
 
-          if title
-            primary_part_atts[:identifier]  = atts[:identifier].clone
+          if identifier && title
+            primary_part_atts[:identifier] = atts[:identifier].clone
             atts.delete(:identifier)
           end
 
