@@ -54,6 +54,7 @@ class EAD3Serializer < EADSerializer
 
       ##### this is also bad, primarily because the helper file adds "fmo" to all agents linked as sources.
       ##### so, we'll start from scratch for here and make sure not to supply data that isn't there.... and also we'll split out terms into separate part elements.
+      ##### and, last, since we could still get an empty controlaccess section if there's only an agent linked as a source, we'll remove empty controlaccess elements during our post-export EAD transformation.
       # data.controlaccess_linked_agents.each do |node_data|
 
       #   if node_data[:atts][:role]
@@ -76,7 +77,7 @@ class EAD3Serializer < EADSerializer
 
         terms = link['terms']
 
-        role = link['relator']
+        relator = link['relator']
 
         agent = link['_resolved'].dup
         rules = agent['display_name']['rules']
@@ -91,7 +92,7 @@ class EAD3Serializer < EADSerializer
                   end
 
         atts = {}
-        atts[:role] = role if role
+        atts[:relator] = relator if relator
         atts[:source] = source if source
         atts[:rules] = rules if rules
         atts[:identifier] = identifier if identifier
@@ -129,8 +130,8 @@ class EAD3Serializer < EADSerializer
     unless data.creators_and_sources.nil?
       data.creators_and_sources.each do |link|
         agent = link['_resolved']
-        #not sure why this is needed? Creator vs. source???
-        link['role'] == 'creator' ? role = link['role'].capitalize : role = link['role']
+        #not sure why the EAD3 exporter capitalized "Creator", but not "Source".  let's capitalize both, since it's mapped to a lable (but should be a type)
+        role = link['role'].capitalize()
         relator = link['relator']
         sort_name = agent['display_name']['sort_name']
         rules = agent['display_name']['rules']
@@ -250,7 +251,7 @@ class EAD3Serializer < EADSerializer
 
     atts = {:id => prefix_id(note['persistent_id']) }.reject{|k,v| v.nil? || v.empty? || v == "null" }.merge(audatt)
 
-    if note["type"] == 'accessrestrict' && !note["rights_restriction"]["local_access_restriction_type"].empty?
+    if note["type"] == 'accessrestrict' && note["rights_restriction"] && !note["rights_restriction"]["local_access_restriction_type"].empty?
       accessatt = {:localtype => note["rights_restriction"]["local_access_restriction_type"].join(' ')}
       atts = atts.merge(accessatt)
     end
@@ -491,15 +492,12 @@ class EAD3Serializer < EADSerializer
         instanceurl: data.ead_location
       }
 
-      otherrecordid_atts = {
-        localtype: "BIB"
-      }
-
       xml.recordid(recordid_atts) {
         xml.text(data.ead_id)
       }
 
-      if data.user_defined['string_2']
+      if data.user_defined && data.user_defined['string_2']
+        otherrecordid_atts = { localtype: "BIB" }
         xml.otherrecordid(otherrecordid_atts) {
           xml.text(data.user_defined['string_2'])
         }
