@@ -277,12 +277,15 @@ class EAD3Serializer < EADSerializer
     atts[:id] = prefix_id(SecureRandom.hex)
     last_id = atts[:id]
 
-    atts[:type] = top['type']
+    atts[:localtype] = top['type']
     text = top['indicator']
 
     atts[:label] = I18n.t("enumerations.instance_instance_type.#{inst['instance_type']}",
                           :default => inst['instance_type'])
-    atts[:label] << " [#{top['barcode']}]" if top['barcode']
+
+    if top['barcode']
+      atts[:containerid] = "#{top['barcode']}"
+    end
 
     # by default, container profiles are added to altrender.  we need to do something different, though
     # to keep all of our altrenders the same.
@@ -294,10 +297,9 @@ class EAD3Serializer < EADSerializer
     # more new stuff
     atts[:altrender] = top['uri']
 
-    # and to get the location URI
     if (locations = top['container_locations'])
       first_location = locations.select {|l| l['status'] == 'current'}.first
-      atts[:altrender] += ' ' + first_location['ref']
+      atts[:altrender] += ' ' + first_location['ref'] if first_location
     end
 
     xml.container(atts) {
@@ -313,7 +315,7 @@ class EAD3Serializer < EADSerializer
       atts[:parent] = last_id
       last_id = atts[:id]
 
-      atts[:type] = sub["type_#{n}"]
+      atts[:localtype] = sub["type_#{n}"]
       text = sub["indicator_#{n}"]
 
       xml.container(atts) {
