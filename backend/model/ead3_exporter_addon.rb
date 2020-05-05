@@ -379,10 +379,10 @@ class EAD3Serializer < EADSerializer
      }
    elsif file_versions_to_display.length == 1
      file_version = file_versions_to_display.first
-     atts['actuate'] = file_version['xlink_actuate_attribute'] || 'onrequest'
+     atts['actuate'] = file_version['xlink_actuate_attribute'].nil? ? 'onrequest' : file_version['xlink_actuate_attribute'].downcase
      atts['show'] = file_version['xlink_show_attribute'] || 'new'
      atts['role'] = file_version['use_statement'] if file_version['use_statement']
-     atts['title'] = file_version['caption'] if file_version['caption']
+     atts['linktitle'] = file_version['caption'] if file_version['caption']
      atts['href'] = file_version['file_uri']
      atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
      xml.dao(atts) {
@@ -395,10 +395,10 @@ class EAD3Serializer < EADSerializer
      atts.delete('altrender')
      xml.daoset( set_atts ) {
        file_versions_to_display.each do |file_version|
-         atts['actuate'] = file_version['xlink_actuate_attribute'] || 'onrequest'
+         atts['actuate'] = file_version['xlink_actuate_attribute'].nil? ? 'onrequest' : file_version['xlink_actuate_attribute'].downcase
          atts['show'] = file_version['xlink_show_attribute'] || 'new'
          atts['role'] = file_version['use_statement'] if file_version['use_statement']
-         atts['title'] = file_version['caption'] if file_version['caption']
+         atts['linktitle'] = file_version['caption'] if file_version['caption']
          atts['href'] = file_version['file_uri']
          atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
          xml.dao( atts )
