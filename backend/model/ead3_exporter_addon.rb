@@ -342,7 +342,6 @@ class EAD3Serializer < EADSerializer
 
   # ANW-285: Only serialize file versions that are published, unless include_unpublished flag is set
   file_versions_to_display = digital_object['file_versions'].select {|fv| fv['publish'] == true || @include_unpublished }
-
   title = digital_object['title']
   date = digital_object['dates'][0] || {}
 
@@ -359,28 +358,33 @@ class EAD3Serializer < EADSerializer
       content << "-#{date['end']}"
     end
   end
-  # title is already exported to daodesc/p, so no need to try to jam it and duplicate it into an attribute
-  atts['title'] = digital_object['digital_object_id'] if digital_object['digital_object_id']
+  # title is already exported to descriptivenote/p, so no need to try to jam it and duplicate it into an attribute
+  atts['linktitle'] = digital_object['digital_object_id'] if digital_object['digital_object_id']
   # and let's keep those URIs everywhere....
   atts['altrender'] = digital_object['uri']
 
+  if digital_object['digital_object_type']
+    atts['daotype'] = 'otherdaotype'
+    atts['otherdaotype'] = digital_object['digital_object_type']
+  else
+    atts['daotype'] = 'unknown'
+  end
 
   if file_versions_to_display.empty?
     atts['href'] = digital_object['digital_object_id']
     atts['audience'] = 'internal' unless is_digital_object_published?(digital_object)
     xml.dao(atts) {
-      xml.daodesc{ sanitize_mixed_content(content, xml, fragments, true) } if content
+      xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
     }
   elsif file_versions_to_display.length == 1
     file_version = file_versions_to_display.first
-
     atts['actuate'] = file_version['xlink_actuate_attribute'] || 'onrequest'
     atts['show'] = file_version['xlink_show_attribute'] || 'new'
     atts['linkrole'] = file_version['use_statement'] if file_version['use_statement']
     atts['href'] = file_version['file_uri']
     atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
     xml.dao(atts) {
-      xml.daodesc{ sanitize_mixed_content(content, xml, fragments, true) } if content
+      xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
     }
   else
     atts['audience'] = 'internal' unless is_digital_object_published?(digital_object)
@@ -392,11 +396,11 @@ class EAD3Serializer < EADSerializer
         atts['show'] = file_version['xlink_show_attribute'] || 'new'
         atts['href'] = file_version['file_uri']
         atts['linkrole'] = file_version['use_statement'] if file_version['use_statement']
-        atts['title'] = file_version['caption'] if file_version['caption']
+        atts['linktitle'] = file_version['caption'] if file_version['caption']
         atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
         xml.dao(atts)
       end
-      xml.daodesc{ sanitize_mixed_content(content, xml, fragments, true) } if content
+      xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
     }
     end
  end
@@ -554,13 +558,14 @@ class EAD3Serializer < EADSerializer
 
             EADSerializer.run_serialize_step(data, xml, @fragments, :did)
 
+            # Change from EAD 2002: dao must be children of did in EAD3, not archdesc
+            data.digital_objects.each do |dob|
+              serialize_digital_object(dob, xml, @fragments)
+            end
+
           }# </did>
 
           serialize_nondid_notes(data, xml, @fragments)
-
-          data.digital_objects.each do |dob|
-                serialize_digital_object(dob, xml, @fragments)
-          end
 
           serialize_bibliographies(data, xml, @fragments)
 
