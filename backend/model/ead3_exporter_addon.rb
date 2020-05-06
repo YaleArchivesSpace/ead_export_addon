@@ -267,6 +267,146 @@ class EAD3Serializer < EADSerializer
     }
   end
 
+  # keep AS IS during upgrade.  adding URLs for top containers and locations.
+  def serialize_container(inst, xml, fragments)
+    atts = {}
+
+    sub = inst['sub_container']
+    top = sub['top_container']['_resolved']
+
+    atts[:id] = prefix_id(SecureRandom.hex)
+    last_id = atts[:id]
+
+    atts[:localtype] = top['type']
+    text = top['indicator']
+
+    atts[:label] = I18n.t("enumerations.instance_instance_type.#{inst['instance_type']}",
+                          :default => inst['instance_type'])
+
+    if top['barcode']
+      atts[:containerid] = "#{top['barcode']}"
+    end
+
+    # by default, container profiles are added to altrender.  we need to do something different, though
+    # to keep all of our altrenders the same.
+    # :altrender => data.uri
+    if (cp = top['container_profile'])
+      atts[:encodinganalog] = cp['_resolved']['url'] || cp['_resolved']['name']
+    end
+
+    # more new stuff
+    atts[:altrender] = top['uri']
+
+    if (locations = top['container_locations'])
+      first_location = locations.select {|l| l['status'] == 'current'}.first
+      atts[:altrender] += ' ' + first_location['ref'] if first_location
+    end
+
+    xml.container(atts) {
+      sanitize_mixed_content(text, xml, fragments)
+    }
+
+    (2..3).each do |n|
+      atts = {}
+
+      next unless sub["type_#{n}"]
+
+      atts[:id] = prefix_id(SecureRandom.hex)
+      atts[:parent] = last_id
+      last_id = atts[:id]
+
+      atts[:localtype] = sub["type_#{n}"]
+      text = sub["indicator_#{n}"]
+
+      xml.container(atts) {
+        sanitize_mixed_content(text, xml, fragments)
+      }
+    end
+  end
+
+ # Remove after upgrade.
+ def is_digital_object_published?(digital_object, file_version = nil)
+    if !digital_object['publish']
+      return false
+    elsif !file_version.nil? and !file_version['publish']
+      return false
+    else
+      return true
+    end
+ end
+
+ # keep AS IS during upgrade.  already using the new DAO serializations... but now with URLs and captions.
+ def serialize_digital_object(digital_object, xml, fragments)
+   return if digital_object["publish"] === false && !@include_unpublished
+   return if digital_object["suppressed"] === true
+
+   # ANW-285: Only serialize file versions that are published, unless include_unpublished flag is set
+   file_versions_to_display = digital_object['file_versions'].select {|fv| fv['publish'] == true || @include_unpublished }
+
+   title = digital_object['title']
+   date = digital_object['dates'][0] || {}
+
+   atts = {}
+
+   content = ""
+   content << title if title
+   content << ": " if date['expression'] || date['begin']
+   if date['expression']
+     content << date['expression']
+   elsif date['begin']
+     content << date['begin']
+     if date['end'] != date['begin']
+       content << "-#{date['end']}"
+     end
+   end
+
+   #the title is already added to descriptivenote/p, so no need to repeat here. let's use the new identifier attribute in EAD3
+   atts['identifier'] = digital_object['digital_object_id'] if digital_object['digital_object_id']
+   # and let's keep those URIs in the same place everywhere...
+   atts['altrender'] = digital_object['uri']
+
+   if digital_object['digital_object_type']
+     atts['daotype'] = 'otherdaotype'
+     atts['otherdaotype'] = digital_object['digital_object_type']
+   else
+     atts['daotype'] = 'unknown'
+   end
+
+   if file_versions_to_display.empty?
+     atts['audience'] = 'internal' unless is_digital_object_published?(digital_object)
+     xml.dao(atts) {
+       xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
+     }
+   elsif file_versions_to_display.length == 1
+     file_version = file_versions_to_display.first
+     atts['actuate'] = file_version['xlink_actuate_attribute'].nil? ? 'onrequest' : file_version['xlink_actuate_attribute'].downcase
+     atts['show'] = file_version['xlink_show_attribute'] || 'new'
+     atts['role'] = file_version['use_statement'] if file_version['use_statement']
+     atts['linktitle'] = file_version['caption'] if file_version['caption']
+     atts['href'] = file_version['file_uri']
+     atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
+     xml.dao(atts) {
+       xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
+     }
+   else
+     set_atts = {}
+     set_atts['altrender'] = atts['altrender']
+     set_atts['audience'] = 'internal' unless is_digital_object_published?(digital_object)
+     atts.delete('altrender')
+     xml.daoset( set_atts ) {
+       file_versions_to_display.each do |file_version|
+         atts['actuate'] = file_version['xlink_actuate_attribute'].nil? ? 'onrequest' : file_version['xlink_actuate_attribute'].downcase
+         atts['show'] = file_version['xlink_show_attribute'] || 'new'
+         atts['role'] = file_version['use_statement'] if file_version['use_statement']
+         atts['linktitle'] = file_version['caption'] if file_version['caption']
+         atts['href'] = file_version['file_uri']
+         atts['audience'] = 'internal' unless is_digital_object_published?(digital_object, file_version)
+         xml.dao( atts )
+       end
+       xml.descriptivenote{ sanitize_mixed_content(content, xml, fragments, true) } if content
+     }
+   end
+ end
 
   # use new def from EAD2002 once we upgrade, but add back in the URIs.
   def serialize_child(data, xml, fragments, c_depth = 1)
@@ -421,13 +561,14 @@ class EAD3Serializer < EADSerializer
 
             EADSerializer.run_serialize_step(data, xml, @fragments, :did)
 
+            # Change from EAD 2002: dao must be children of did in EAD3, not archdesc
+            data.digital_objects.each do |dob|
+              serialize_digital_object(dob, xml, @fragments)
+            end
+
           }# </did>
 
           serialize_nondid_notes(data, xml, @fragments)
-
-          data.digital_objects.each do |dob|
-                serialize_digital_object(dob, xml, @fragments)
-          end
 
           serialize_bibliographies(data, xml, @fragments)
 
