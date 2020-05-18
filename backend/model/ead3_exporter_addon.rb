@@ -186,12 +186,15 @@ class EAD3Serializer < EADSerializer
     obj.dates.each do |date|
       next if date["publish"] === false && !@include_unpublished
 
+      #we're now adding the date expression to altrender, so no need to handle this hack after the export.
+      #another benefit is that we can convert @standardate values to display values, if we want.  and we do.
       date_atts = {
         certainty: date['certainty'] ? date['certainty'] : nil,
         era: date['era'] ? date['era'] : nil,
         calendar: date['calendar'] ? date['calendar'] : nil,
         audience: date['publish'] === false ? 'internal' : nil,
-        label: date['label'] ? date['label'] : nil
+        label: date['label'] ? date['label'] : nil,
+        altrender: date['expression'] ? date['expression'] : nil
       }
 
       unless date['date_type'].nil?
@@ -226,16 +229,11 @@ class EAD3Serializer < EADSerializer
               end
             }
           end
-          #no need to have two sibling dates for the same ASpace date, so i'm moving this element up.
-          #now we'll know, unambiguously, when two dates are actually one in the same (since they'll be bundled together)...
-          #and we will post-process this unitdatestructured/unitdate invalidity (rather than have to try to compare siblings that may or may not have originated from the same ASpace date subrecord.)
-          #i think we can "fix" this in the core, by just adding 'expression' to altrender when it's present on a structured date.
-          if date['expression']
-            add_unitdate.call(date['expression'], xml, fragments, date_atts)
-          end
         }
 
       elsif date['expression']
+        #last hack, just to keep it clean, we'll delete the expression from date_atts when serializing to unitdate since there's no need to export that in @altrender and a text node.
+        date_atts.except!(:altrender)
         add_unitdate.call(date['expression'], xml, fragments, date_atts)
       end
 
