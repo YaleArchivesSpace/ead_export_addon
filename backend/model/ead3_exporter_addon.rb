@@ -3,6 +3,17 @@
 class EAD3Serializer < EADSerializer
   serializer_for :ead3
 
+  # remove when upgrading to 2.8.x (this is in core now)
+  def is_digital_object_published?(digital_object, file_version = nil)
+    if !digital_object['publish']
+      return false
+    elsif !file_version.nil? and !file_version['publish']
+      return false
+    else
+      return true
+    end
+  end
+
   # use same approach from MARC exporter
   def find_authority_id(names)
     value_found = nil
